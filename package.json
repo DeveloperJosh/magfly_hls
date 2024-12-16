@@ -2,6 +2,9 @@
   "name": "magfly",
   "module": "src/index.ts",
   "type": "module",
+  "scripts": {
+    "start": "node src/index.js"
+  },
   "devDependencies": {
     "@types/bun": "latest"
   },
