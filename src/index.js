@@ -1,75 +1,83 @@
+// src/index.js
+
 import express from 'express';
-import streamFromMagnet from './lib/streamFromMagnet.js';
+import multer from 'multer';
+import bodyParser from 'body-parser';
+import { randomUUID } from 'crypto';
+import { streamFromInput, getStatusById, getPlaylistUrls } from './lib/streamFromMagnet.js';
 
 const app = express();
-const PORT = 3000;
+const port = 3000;
 
-// In-memory job storage
-// jobs[id] = { status: 'Processing' | 'Done' | 'Error', link: string | null, message?: string }
-const jobs = {};
+const upload = multer({ dest: 'uploads/' });
+
+// Middleware to parse JSON bodies
+app.use(bodyParser.json());
 
 /**
- * Start Stream Endpoint
- * GET /start-stream?magnet=<magnet_link>
- * Returns: { id: <job_id> }
+ * Start streaming endpoint.
+ * Accepts a magnet link via JSON body or a torrent file via multipart/form-data.
  */
-app.get('/start-stream', async (req, res) => {
-  const { magnet } = req.query;
-  if (!magnet) {
-    return res.status(400).json({ error: 'Missing magnet link' });
-  }
+app.post('/start-stream', upload.single('torrentFile'), async (req, res) => {
+  const uniqueId = randomUUID();
+  console.log(`[${uniqueId}] Initializing stream process.`);
 
-  const jobId = Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
+  let input;
 
-  jobs[jobId] = { status: 'Processing', link: null };
-
-  (async () => {
-    try {
-      const { playlistUrl } = await streamFromMagnet(magnet);
-
-      jobs[jobId] = { status: 'Done', link: playlistUrl };
-    } catch (err) {
-      console.error(`Error processing job ${jobId}:`, err);
-      jobs[jobId] = { status: 'Error', link: null, message: err.message };
+  try {
+    if (req.body.magnet) {
+      input = req.body.magnet;
+      console.log(`[${uniqueId}] Received magnet link: ${input}`);
+    } else if (req.file) {
+      const torrentFilePath = req.file.path;
+      input = fs.readFileSync(torrentFilePath);
+      console.log(`[${uniqueId}] Received torrent file: ${req.file.originalname}`);
+      fs.unlinkSync(torrentFilePath);
+    } else {
+      return res.status(400).json({ error: 'No magnet link or torrent file provided.' });
     }
-  })();
 
-  res.json({ id: jobId });
+    res.json({ uniqueId });
+
+    streamFromInput(input, uniqueId)
+      .then((playlistUrls) => {
+        console.log(`[${uniqueId}] Streaming and upload completed.`);
+        playlistUrls[uniqueId] = playlistUrls;
+      })
+      .catch((err) => {
+        console.error(`[${uniqueId}] Streaming failed:`, err);
+        updateStatus(uniqueId, `Error during processing: ${err.message}`);
+      });
+  } catch (err) {
+    console.error(`[${uniqueId}] Error starting stream:`, err);
+    return res.status(500).json({ uniqueId, error: err.message });
+  }
+});
+/**
+ * Get status endpoint.
+ * @param {string} uuid - Unique identifier for the stream.
+ */
+app.get('/status/:uuid', (req, res) => {
+  const uniqueId = req.params.uuid;
+  const status = getStatusById(uniqueId);
+  res.json({ uniqueId, status });
 });
 
 /**
- * Status Endpoint
- * GET /status?id=<job_id>
- * Returns:
- *   - { status: 'Processing' }
- *   - { status: 'Done', link: <playlistUrl> }
- *   - { status: 'Error', message: <error_message> }
+ * Get playlist URLs endpoint.
+ * @param {string} uuid - Unique identifier for the stream.
  */
-app.get('/status', (req, res) => {
-  const { id } = req.query;
-  if (!id || !jobs[id]) {
-    return res.status(404).json({ error: 'Not found' });
+app.get('/playlist/:uuid', (req, res) => {
+  const uniqueId = req.params.uuid;
+  const playlistUrls = getPlaylistUrls(uniqueId);
+
+  if (!playlistUrls || playlistUrls.length === 0) {
+    return res.status(404).json({ error: 'Playlist URLs not found for this UUID.' });
   }
 
-  const job = jobs[id];
-  if (job.status === 'Processing') {
-    return res.json({ status: 'Processing' });
-  } else if (job.status === 'Done') {
-    return res.json({ status: 'Done', link: job.link });
-  } else if (job.status === 'Error') {
-    return res.json({ status: 'Error', message: job.message || 'Something went wrong during processing.' });
-  }
+  res.json({ uniqueId, playlistUrls });
 });
 
-/**
- * Health Check Endpoint
- * GET /health
- * Returns: { status: 'OK' }
- */
-app.get('/health', (req, res) => {
-  res.status(200).json({ status: 'OK' });
-});
-
-app.listen(PORT, () => {
-  console.log(`Server listening on http://localhost:${PORT}`);
+app.listen(port, () => {
+  console.log(`Server listening on http://localhost:${port}`);
 });
