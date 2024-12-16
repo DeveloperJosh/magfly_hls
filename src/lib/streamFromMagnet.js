@@ -1,29 +1,29 @@
-// src/streamFromInput.js
-
 import WebTorrent from 'webtorrent';
 import ffmpeg from 'fluent-ffmpeg';
 import ffmpegPath from 'ffmpeg-static';
 import path from 'path';
 import fs from 'fs';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import client from './redis';
 
 ffmpeg.setFfmpegPath(ffmpegPath);
 
 const s3 = new S3Client({
-  endpoint: "https://neko-minio.b1pohl.easypanel.host", 
+  endpoint: "https://neko-minio.b1pohl.easypanel.host",
   region: "us-east-1",
   credentials: {
-    accessKeyId: process.env.MINIO_ROOT_USER || "admin", 
+    accessKeyId: process.env.MINIO_ROOT_USER || "admin",
     secretAccessKey: process.env.MINIO_ROOT_PASSWORD || "password",
   },
-  forcePathStyle: true 
+  forcePathStyle: true,
 });
 
-const BUCKET_NAME = process.env.MINIO_BUCKET_NAME || 'hls'; 
+const BUCKET_NAME = process.env.MINIO_BUCKET_NAME || 'hls';
 const ROOT_OUTPUT_DIR = path.resolve('./hls-output');
 
-const processStatus = {}; 
-const playlistUrlsMap = {}; 
+const processStatus = {};
+const playlistUrlsMap = {};
+
 /**
  * Ensure the root output directory exists.
  */
@@ -63,18 +63,9 @@ export function getStatusById(uniqueId) {
 }
 
 /**
- * Get the playlist URLs for a process by UUID.
- * @param {string} uniqueId - Unique process identifier.
- * @returns {Array<{ playlistUrl: string, fileName: string }>} - Playlist URLs.
- */
-export function getPlaylistUrls(uniqueId) {
-  return playlistUrlsMap[uniqueId] || [];
-}
-
-/**
  * Upload a single file to MinIO.
  * @param {string} filePath - Local file path.
- * @param {string} key - Object key in MinIO (e.g., "uniqueId/index.m3u8").
+ * @param {string} key - Object key in MinIO.
  * @param {string} [contentType='application/octet-stream'] - MIME type of the file.
  */
 async function uploadFileToMinIO(filePath, key, contentType = 'application/octet-stream') {
@@ -85,7 +76,7 @@ async function uploadFileToMinIO(filePath, key, contentType = 'application/octet
       Bucket: BUCKET_NAME,
       Key: key,
       Body: fileStream,
-      ContentType: contentType
+      ContentType: contentType,
     }));
     console.log(`File uploaded: ${key}`);
   } catch (err) {
@@ -115,18 +106,12 @@ function cleanup(outputDir) {
  * @param {string} uniqueId - Unique identifier for the stream.
  * @returns {Promise<string>} - URL to the `.m3u8` file on MinIO.
  */
-/**
- * Upload all HLS files to MinIO for a single video file and return the playlist URL.
- * @param {string} outputDir - Directory containing HLS files.
- * @param {string} uniqueId - Unique identifier for the stream.
- * @returns {Promise<string>} - URL to the `.m3u8` file on MinIO.
- */
 async function uploadHLSFilesForVideo(outputDir, uniqueId) {
   const files = fs.readdirSync(outputDir);
   const totalFiles = files.length;
   let uploadedFiles = 0;
 
-  const m3u8File = files.find(f => f.endsWith('.m3u8'));
+  const m3u8File = files.find((f) => f.endsWith('.m3u8'));
   if (!m3u8File) throw new Error('No .m3u8 file found after transcoding.');
 
   const m3u8FilePath = path.join(outputDir, m3u8File);
@@ -134,7 +119,7 @@ async function uploadHLSFilesForVideo(outputDir, uniqueId) {
 
   const tsFileMapping = {};
 
-  const tsFiles = files.filter(f => f.endsWith('.ts'));
+  const tsFiles = files.filter((f) => f.endsWith('.ts'));
   for (const tsFile of tsFiles) {
     const randomTsName = `${generateRandomUnicodeName()}.ts`;
     const tsKey = `${uniqueId}/${randomTsName}`;
@@ -158,7 +143,6 @@ async function uploadHLSFilesForVideo(outputDir, uniqueId) {
 
   await uploadFileToMinIO(m3u8FilePath, m3u8Key, 'application/vnd.apple.mpegurl');
   uploadedFiles++;
-  console.log(`[${uniqueId}] Upload progress: ${Math.round((uploadedFiles / totalFiles) * 100)}%`);
 
   const playlistUrl = `https://neko-minio.b1pohl.easypanel.host/${BUCKET_NAME}/${m3u8Key}`;
   playlistUrlsMap[uniqueId] = playlistUrlsMap[uniqueId] || [];
@@ -197,7 +181,7 @@ async function processTorrentFiles(torrent, uniqueId) {
           '-start_number 0',
           '-hls_time 10',
           '-hls_list_size 0',
-          '-f hls'
+          '-f hls',
         ])
         .output(m3u8Path)
         .on('start', (cmd) => {
@@ -213,7 +197,7 @@ async function processTorrentFiles(torrent, uniqueId) {
           try {
             const playlistUrl = await uploadHLSFilesForVideo(outputDir, uniqueId);
             playlistUrls.push({ playlistUrl, fileName: file.name });
-            cleanup(outputDir); // Cleanup after processing
+            cleanup(outputDir);
             resolve();
           } catch (err) {
             cleanup(outputDir);
@@ -251,13 +235,21 @@ export async function resolveInput(input) {
 }
 
 /**
- * Stream from a magnet URI or torrent file buffer.
+ * Stream from a magnet URI or torrent file buffer with Redis caching.
  * @param {string|Buffer} input - Magnet URI or torrent file buffer.
  * @param {string} uniqueId - Unique identifier for the stream.
  * @returns {Promise<Array<{ playlistUrl: string, fileName: string }>>}
  */
 export async function streamFromInput(input, uniqueId) {
   ensureRootOutputDir();
+
+  // Check if results exist in Redis cache
+  const cachedData = await client.get(uniqueId);
+  if (cachedData) {
+    console.log(`[${uniqueId}] Cache hit. Returning cached data.`);
+    return JSON.parse(cachedData);
+  }
+
   const resolvedInput = await resolveInput(input);
 
   return new Promise((resolve, reject) => {
@@ -281,6 +273,10 @@ export async function streamFromInput(input, uniqueId) {
         wtClient.destroy(() => {
           console.log(`[${uniqueId}] WebTorrent client destroyed.`);
         });
+
+        // Store results in Redis cache
+        await client.set(uniqueId, JSON.stringify(playlistUrls), { EX: 3600 * 6 }); // Cache for 6 hours
+
         updateStatus(uniqueId, 'Process complete.');
         resolve(playlistUrls);
       } catch (err) {
