@@ -14,6 +14,16 @@ const upload = multer({ dest: 'uploads/' });
 // Middleware to parse JSON bodies
 app.use(bodyParser.json());
 
+app.get('/', (req, res) => {
+  // map the available endpoints
+  res.json({
+    '/': 'This page.',
+    '/start-stream': 'Start streaming from a magnet link or torrent file.',
+    '/status/:uuid': 'Get the status of a stream by UUID.',
+    '/playlist/:uuid': 'Get the playlist URLs of a stream by UUID.',
+  });
+});
+
 /**
  * Start streaming endpoint.
  * Accepts a magnet link via JSON body or a torrent file via multipart/form-data.
