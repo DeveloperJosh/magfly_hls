@@ -19,7 +19,7 @@ const s3 = new S3Client({
   forcePathStyle: true 
 });
 
-const BUCKET_NAME = "hls"; 
+const BUCKET_NAME = process.env.MINIO_BUCKET_NAME || 'hls'; 
 const ROOT_OUTPUT_DIR = path.resolve('./hls-output');
 
 const processStatus = {}; 
