@@ -299,3 +299,8 @@ export async function streamFromInput(input, uniqueId) {
     });
   });
 }
+
+export function getPlaylistUrls(uniqueId) {
+  return playlistUrlsMap[uniqueId] || [];
+}
+
