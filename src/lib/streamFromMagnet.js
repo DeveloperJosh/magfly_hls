@@ -4,7 +4,7 @@ import ffmpegPath from 'ffmpeg-static';
 import path from 'path';
 import fs from 'fs';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
-import client from './redis';
+import client from './redis.js';
 
 ffmpeg.setFfmpegPath(ffmpegPath);
 
