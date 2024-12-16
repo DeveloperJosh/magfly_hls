@@ -4,7 +4,9 @@ import ffmpegPath from 'ffmpeg-static';
 import path from 'path';
 import fs from 'fs';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
-import client from './redis.js';
+import dotenv from 'dotenv';
+
+dotenv.config();
 
 ffmpeg.setFfmpegPath(ffmpegPath);
 
@@ -15,7 +17,7 @@ const s3 = new S3Client({
     accessKeyId: process.env.MINIO_ROOT_USER || "admin",
     secretAccessKey: process.env.MINIO_ROOT_PASSWORD || "password",
   },
-  forcePathStyle: true,
+  forcePathStyle: true
 });
 
 const BUCKET_NAME = process.env.MINIO_BUCKET_NAME || 'hls';
@@ -63,7 +65,7 @@ export function getStatusById(uniqueId) {
 }
 
 /**
- * Get playlist URLs by UUID.
+ * Get the playlist URLs for a process by UUID.
  * @param {string} uniqueId - Unique process identifier.
  * @returns {Array<{ playlistUrl: string, fileName: string }>} - Playlist URLs.
  */
@@ -74,7 +76,7 @@ export function getPlaylistUrls(uniqueId) {
 /**
  * Upload a single file to MinIO.
  * @param {string} filePath - Local file path.
- * @param {string} key - Object key in MinIO.
+ * @param {string} key - Object key in MinIO (e.g., "uniqueId/index.m3u8").
  * @param {string} [contentType='application/octet-stream'] - MIME type of the file.
  */
 async function uploadFileToMinIO(filePath, key, contentType = 'application/octet-stream') {
@@ -85,7 +87,7 @@ async function uploadFileToMinIO(filePath, key, contentType = 'application/octet
       Bucket: BUCKET_NAME,
       Key: key,
       Body: fileStream,
-      ContentType: contentType,
+      ContentType: contentType
     }));
     console.log(`File uploaded: ${key}`);
   } catch (err) {
@@ -113,14 +115,14 @@ function cleanup(outputDir) {
  * Upload all HLS files to MinIO for a single video file and return the playlist URL.
  * @param {string} outputDir - Directory containing HLS files.
  * @param {string} uniqueId - Unique identifier for the stream.
- * @returns {Promise<string>} - URL to the `.m3u8` file on MinIO.
+ * @returns {Promise<string>} - URL to the .m3u8 file on MinIO.
  */
 async function uploadHLSFilesForVideo(outputDir, uniqueId) {
   const files = fs.readdirSync(outputDir);
   const totalFiles = files.length;
   let uploadedFiles = 0;
 
-  const m3u8File = files.find((f) => f.endsWith('.m3u8'));
+  const m3u8File = files.find(f => f.endsWith('.m3u8'));
   if (!m3u8File) throw new Error('No .m3u8 file found after transcoding.');
 
   const m3u8FilePath = path.join(outputDir, m3u8File);
@@ -128,7 +130,7 @@ async function uploadHLSFilesForVideo(outputDir, uniqueId) {
 
   const tsFileMapping = {};
 
-  const tsFiles = files.filter((f) => f.endsWith('.ts'));
+  const tsFiles = files.filter(f => f.endsWith('.ts'));
   for (const tsFile of tsFiles) {
     const randomTsName = `${generateRandomUnicodeName()}.ts`;
     const tsKey = `${uniqueId}/${randomTsName}`;
@@ -152,6 +154,7 @@ async function uploadHLSFilesForVideo(outputDir, uniqueId) {
 
   await uploadFileToMinIO(m3u8FilePath, m3u8Key, 'application/vnd.apple.mpegurl');
   uploadedFiles++;
+  console.log(`[${uniqueId}] Upload progress: ${Math.round((uploadedFiles / totalFiles) * 100)}%`);
 
   const playlistUrl = `https://neko-minio.b1pohl.easypanel.host/${BUCKET_NAME}/${m3u8Key}`;
   playlistUrlsMap[uniqueId] = playlistUrlsMap[uniqueId] || [];
@@ -190,7 +193,7 @@ async function processTorrentFiles(torrent, uniqueId) {
           '-start_number 0',
           '-hls_time 10',
           '-hls_list_size 0',
-          '-f hls',
+          '-f hls'
         ])
         .output(m3u8Path)
         .on('start', (cmd) => {
@@ -206,7 +209,7 @@ async function processTorrentFiles(torrent, uniqueId) {
           try {
             const playlistUrl = await uploadHLSFilesForVideo(outputDir, uniqueId);
             playlistUrls.push({ playlistUrl, fileName: file.name });
-            cleanup(outputDir);
+            cleanup(outputDir); // Cleanup after processing
             resolve();
           } catch (err) {
             cleanup(outputDir);
@@ -244,72 +247,55 @@ export async function resolveInput(input) {
 }
 
 /**
- * Stream from a magnet URI or torrent file buffer with Redis caching.
+ * Stream from a magnet URI or torrent file buffer.
  * @param {string|Buffer} input - Magnet URI or torrent file buffer.
  * @param {string} uniqueId - Unique identifier for the stream.
  * @returns {Promise<Array<{ playlistUrl: string, fileName: string }>>}
  */
 export async function streamFromInput(input, uniqueId) {
   ensureRootOutputDir();
+  const resolvedInput = await resolveInput(input);
 
-  try {
-    // Check if results exist in Redis cache
-    const cachedData = await client.get(uniqueId);
-    if (cachedData) {
-      console.log(`[${uniqueId}] Cache hit. Returning cached data.`);
-      return JSON.parse(cachedData);
-    }
+  return new Promise((resolve, reject) => {
+    const wtClient = new WebTorrent({ utp: false });
 
-    const resolvedInput = await resolveInput(input);
+    console.log(`[${uniqueId}] Adding torrent.`);
+    wtClient.add(resolvedInput, async (torrent) => {
+      try {
+        updateStatus(uniqueId, 'Torrent added. Processing video files...');
 
-    return new Promise((resolve, reject) => {
-      const wtClient = new WebTorrent({ utp: false });
+        torrent.on('download', (bytes) => {
+          console.log(`[${uniqueId}] Downloaded ${bytes} bytes.`);
+        });
 
-      console.log(`[${uniqueId}] Adding torrent.`);
-      wtClient.add(resolvedInput, async (torrent) => {
-        try {
-          updateStatus(uniqueId, 'Torrent added. Processing video files...');
+        torrent.on('done', () => {
+          console.log(`[${uniqueId}] Torrent download complete.`);
+          updateStatus(uniqueId, 'Torrent download complete. Processing files...');
+        });
 
-          torrent.on('download', (bytes) => {
-            console.log(`[${uniqueId}] Downloaded ${bytes} bytes.`);
-          });
-
-          torrent.on('done', () => {
-            console.log(`[${uniqueId}] Torrent download complete.`);
-            updateStatus(uniqueId, 'Torrent download complete. Processing files...');
-          });
-
-          const playlistUrls = await processTorrentFiles(torrent, uniqueId);
-          wtClient.destroy(() => {
-            console.log(`[${uniqueId}] WebTorrent client destroyed.`);
-          });
-
-          // Store results in Redis cache
-          await client.set(uniqueId, JSON.stringify(playlistUrls), { EX: 3600 * 6 }); // Cache for 6 hours
-
-          updateStatus(uniqueId, 'Process complete.');
-          resolve(playlistUrls);
-        } catch (err) {
-          wtClient.destroy(() => {
-            console.error(`[${uniqueId}] Error during WebTorrent client destruction:`, err);
-          });
-          updateStatus(uniqueId, `Error during processing: ${err.message}`);
-          reject(err);
-        }
-      });
-
-      wtClient.on('error', (err) => {
-        if (err.code === 'UTP_ECONNRESET') {
-          console.warn(`[${uniqueId}] Warning: UTP connection reset.`);
-        } else {
-          console.error(`[${uniqueId}] WebTorrent error:`, err);
-          updateStatus(uniqueId, `WebTorrent error: ${err.message}`);
-          reject(err);
-        }
-      });
+        const playlistUrls = await processTorrentFiles(torrent, uniqueId);
+        wtClient.destroy(() => {
+          console.log(`[${uniqueId}] WebTorrent client destroyed.`);
+        });
+        updateStatus(uniqueId, 'Process complete.');
+        resolve(playlistUrls);
+      } catch (err) {
+        wtClient.destroy(() => {
+          console.error(`[${uniqueId}] Error during WebTorrent client destruction:`, err);
+        });
+        updateStatus(uniqueId, `Error during processing: ${err.message}`);
+        reject(err);
+      }
     });
-  } catch (err) {
-    console.error(`[${uniqueId}] Redis operation failed:`, err);
-    throw err;
-  }
+
+    wtClient.on('error', (err) => {
+      if (err.code === 'UTP_ECONNRESET') {
+        console.warn(`[${uniqueId}] Warning: UTP connection reset.`);
+      } else {
+        console.error(`[${uniqueId}] WebTorrent error:`, err);
+        updateStatus(uniqueId, `WebTorrent error: ${err.message}`);
+        reject(err);
+      }
+    });
+  });
 }
