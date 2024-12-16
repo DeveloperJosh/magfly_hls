@@ -48,7 +48,7 @@ function generateRandomUnicodeName() {
  * @param {string} uniqueId - Unique process identifier.
  * @param {string} status - Status message.
  */
-function updateStatus(uniqueId, status) {
+export function updateStatus(uniqueId, status) {
   processStatus[uniqueId] = status;
   console.log(`[${uniqueId}] Status: ${status}`);
 }
@@ -60,6 +60,15 @@ function updateStatus(uniqueId, status) {
  */
 export function getStatusById(uniqueId) {
   return processStatus[uniqueId] || 'Unknown ID or process not started.';
+}
+
+/**
+ * Get playlist URLs by UUID.
+ * @param {string} uniqueId - Unique process identifier.
+ * @returns {Array<{ playlistUrl: string, fileName: string }>} - Playlist URLs.
+ */
+export function getPlaylistUrls(uniqueId) {
+  return playlistUrlsMap[uniqueId] || [];
 }
 
 /**
@@ -243,64 +252,64 @@ export async function resolveInput(input) {
 export async function streamFromInput(input, uniqueId) {
   ensureRootOutputDir();
 
-  // Check if results exist in Redis cache
-  const cachedData = await client.get(uniqueId);
-  if (cachedData) {
-    console.log(`[${uniqueId}] Cache hit. Returning cached data.`);
-    return JSON.parse(cachedData);
+  try {
+    // Check if results exist in Redis cache
+    const cachedData = await client.get(uniqueId);
+    if (cachedData) {
+      console.log(`[${uniqueId}] Cache hit. Returning cached data.`);
+      return JSON.parse(cachedData);
+    }
+
+    const resolvedInput = await resolveInput(input);
+
+    return new Promise((resolve, reject) => {
+      const wtClient = new WebTorrent({ utp: false });
+
+      console.log(`[${uniqueId}] Adding torrent.`);
+      wtClient.add(resolvedInput, async (torrent) => {
+        try {
+          updateStatus(uniqueId, 'Torrent added. Processing video files...');
+
+          torrent.on('download', (bytes) => {
+            console.log(`[${uniqueId}] Downloaded ${bytes} bytes.`);
+          });
+
+          torrent.on('done', () => {
+            console.log(`[${uniqueId}] Torrent download complete.`);
+            updateStatus(uniqueId, 'Torrent download complete. Processing files...');
+          });
+
+          const playlistUrls = await processTorrentFiles(torrent, uniqueId);
+          wtClient.destroy(() => {
+            console.log(`[${uniqueId}] WebTorrent client destroyed.`);
+          });
+
+          // Store results in Redis cache
+          await client.set(uniqueId, JSON.stringify(playlistUrls), { EX: 3600 * 6 }); // Cache for 6 hours
+
+          updateStatus(uniqueId, 'Process complete.');
+          resolve(playlistUrls);
+        } catch (err) {
+          wtClient.destroy(() => {
+            console.error(`[${uniqueId}] Error during WebTorrent client destruction:`, err);
+          });
+          updateStatus(uniqueId, `Error during processing: ${err.message}`);
+          reject(err);
+        }
+      });
+
+      wtClient.on('error', (err) => {
+        if (err.code === 'UTP_ECONNRESET') {
+          console.warn(`[${uniqueId}] Warning: UTP connection reset.`);
+        } else {
+          console.error(`[${uniqueId}] WebTorrent error:`, err);
+          updateStatus(uniqueId, `WebTorrent error: ${err.message}`);
+          reject(err);
+        }
+      });
+    });
+  } catch (err) {
+    console.error(`[${uniqueId}] Redis operation failed:`, err);
+    throw err;
   }
-
-  const resolvedInput = await resolveInput(input);
-
-  return new Promise((resolve, reject) => {
-    const wtClient = new WebTorrent({ utp: false });
-
-    console.log(`[${uniqueId}] Adding torrent.`);
-    wtClient.add(resolvedInput, async (torrent) => {
-      try {
-        updateStatus(uniqueId, 'Torrent added. Processing video files...');
-
-        torrent.on('download', (bytes) => {
-          console.log(`[${uniqueId}] Downloaded ${bytes} bytes.`);
-        });
-
-        torrent.on('done', () => {
-          console.log(`[${uniqueId}] Torrent download complete.`);
-          updateStatus(uniqueId, 'Torrent download complete. Processing files...');
-        });
-
-        const playlistUrls = await processTorrentFiles(torrent, uniqueId);
-        wtClient.destroy(() => {
-          console.log(`[${uniqueId}] WebTorrent client destroyed.`);
-        });
-
-        // Store results in Redis cache
-        await client.set(uniqueId, JSON.stringify(playlistUrls), { EX: 3600 * 6 }); // Cache for 6 hours
-
-        updateStatus(uniqueId, 'Process complete.');
-        resolve(playlistUrls);
-      } catch (err) {
-        wtClient.destroy(() => {
-          console.error(`[${uniqueId}] Error during WebTorrent client destruction:`, err);
-        });
-        updateStatus(uniqueId, `Error during processing: ${err.message}`);
-        reject(err);
-      }
-    });
-
-    wtClient.on('error', (err) => {
-      if (err.code === 'UTP_ECONNRESET') {
-        console.warn(`[${uniqueId}] Warning: UTP connection reset.`);
-      } else {
-        console.error(`[${uniqueId}] WebTorrent error:`, err);
-        updateStatus(uniqueId, `WebTorrent error: ${err.message}`);
-        reject(err);
-      }
-    });
-  });
 }
-
-export function getPlaylistUrls(uniqueId) {
-  return playlistUrlsMap[uniqueId] || [];
-}
-

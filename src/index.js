@@ -1,10 +1,8 @@
-// src/index.js
-
 import express from 'express';
 import multer from 'multer';
 import bodyParser from 'body-parser';
 import { randomUUID } from 'crypto';
-import { streamFromInput, getStatusById, getPlaylistUrls } from './lib/streamFromMagnet.js';
+import { streamFromInput, getStatusById, getPlaylistUrls, updateStatus } from './lib/streamFromMagnet.js';
 
 const app = express();
 const port = 3000;
@@ -15,7 +13,6 @@ const upload = multer({ dest: 'uploads/' });
 app.use(bodyParser.json());
 
 app.get('/', (req, res) => {
-  // map the available endpoints
   res.json({
     '/': 'This page.',
     '/start-stream?magnet=': 'Start streaming from a magnet link or torrent file.',
@@ -24,10 +21,6 @@ app.get('/', (req, res) => {
   });
 });
 
-/**
- * Start streaming endpoint.
- * Accepts a magnet link via JSON body or a torrent file via multipart/form-data.
- */
 app.post('/start-stream', upload.single('torrentFile'), async (req, res) => {
   const uniqueId = randomUUID();
   console.log(`[${uniqueId}] Initializing stream process.`);
@@ -49,34 +42,22 @@ app.post('/start-stream', upload.single('torrentFile'), async (req, res) => {
 
     res.json({ uniqueId });
 
-    streamFromInput(input, uniqueId)
-      .then((playlistUrls) => {
-        console.log(`[${uniqueId}] Streaming and upload completed.`);
-        playlistUrls[uniqueId] = playlistUrls;
-      })
-      .catch((err) => {
-        console.error(`[${uniqueId}] Streaming failed:`, err);
-        updateStatus(uniqueId, `Error during processing: ${err.message}`);
-      });
+    streamFromInput(input, uniqueId).catch((err) => {
+      console.error(`[${uniqueId}] Streaming failed:`, err);
+      updateStatus(uniqueId, `Error during processing: ${err.message}`);
+    });
   } catch (err) {
     console.error(`[${uniqueId}] Error starting stream:`, err);
     return res.status(500).json({ uniqueId, error: err.message });
   }
 });
-/**
- * Get status endpoint.
- * @param {string} uuid - Unique identifier for the stream.
- */
+
 app.get('/status/:uuid', (req, res) => {
   const uniqueId = req.params.uuid;
   const status = getStatusById(uniqueId);
   res.json({ uniqueId, status });
 });
 
-/**
- * Get playlist URLs endpoint.
- * @param {string} uuid - Unique identifier for the stream.
- */
 app.get('/playlist/:uuid', (req, res) => {
   const uniqueId = req.params.uuid;
   const playlistUrls = getPlaylistUrls(uniqueId);
